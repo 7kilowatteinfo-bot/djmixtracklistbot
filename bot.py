@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import logging
-from pathlib import Path
 
 from telegram import Update
 from telegram.ext import (
@@ -13,22 +12,24 @@ from telegram.ext import (
     filters,
 )
 
-from recognizer import process_mix
+from audd_client import recognize_url
+from tracklist import build_tracklist, render
 
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
-logger = logging.getLogger("dj-tracklist-bot")
 
+TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN"
+)
 
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+AUDD_TOKEN = os.getenv(
+    "AUDD_API_TOKEN"
+)
 
-
-DOWNLOAD_DIR = Path("downloads")
-DOWNLOAD_DIR.mkdir(exist_ok=True)
 
 
 async def start(
@@ -38,116 +39,102 @@ async def start(
 
     await update.message.reply_text(
         "DJ Tracklist Bot\n\n"
-        "Отправь DJ-микс MP3.\n\n"
-        "Я распознаю треки через AudD, "
-        "уберу повторы и создам треклист с таймкодами."
+        "Пришли публичную HTTPS ссылку на MP3 микс.\n\n"
+        "Я распознаю треки и верну tracklist с таймкодами."
     )
 
 
 
-async def handle_audio(
+async def handle_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    message = update.message
+    text = update.message.text
 
 
-    if not message:
+    if not text:
+
         return
 
 
-    file_obj = None
+    if not text.startswith(
+        "http"
+    ):
 
-
-    if message.audio:
-
-        file_obj = await message.audio.get_file()
-        filename = message.audio.file_name or "mix.mp3"
-
-
-    elif message.document:
-
-        file_obj = await message.document.get_file()
-        filename = message.document.file_name or "mix.mp3"
-
-
-    else:
-
-        await message.reply_text(
-            "Пришли MP3 файлом."
+        await update.message.reply_text(
+            "Нужна прямая HTTPS ссылка на MP3."
         )
 
         return
 
 
 
-    path = DOWNLOAD_DIR / filename
-
-
-    await message.reply_text(
-        "Файл получен.\n"
-        "Начинаю анализ..."
-    )
-
-
-    await file_obj.download_to_drive(
-        custom_path=str(path)
+    await update.message.reply_text(
+        "Анализирую микс...\n"
+        "Это может занять время."
     )
 
 
     try:
 
-        result = await process_mix(path)
 
-
-        output = DOWNLOAD_DIR / "tracklist.txt"
-
-        output.write_text(
-            result,
-            encoding="utf-8"
+        response = await recognize_url(
+            text,
+            AUDD_TOKEN
         )
 
 
-        await message.reply_text(
-            f"Готово.\n\n{result}"
+        tracks = build_tracklist(
+            response
         )
 
 
-        await message.reply_document(
-            document=output.open(
-                "rb"
-            ),
-            filename="tracklist.txt"
+        result = render(
+            tracks
+        )
+
+
+        await update.message.reply_text(
+            result
+        )
+
+
+        logging.info(
+            "Recognized tracks: %s",
+            len(tracks)
         )
 
 
     except Exception as e:
 
-        logger.exception(e)
 
-        await message.reply_text(
-            f"Ошибка анализа:\n{e}"
+        logging.exception(e)
+
+
+        await update.message.reply_text(
+            f"Ошибка:\n{e}"
         )
-
-
-    finally:
-
-        try:
-            path.unlink()
-        except Exception:
-            pass
 
 
 
 
 def main():
 
+
     if not TOKEN:
 
         raise RuntimeError(
-            "Не найден TELEGRAM_BOT_TOKEN"
+            "Нет TELEGRAM_BOT_TOKEN"
         )
+
+
+    if not AUDD_TOKEN:
+
+        raise RuntimeError(
+            "Нет AUDD_API_TOKEN"
+        )
+
 
 
     app = (
@@ -168,14 +155,13 @@ def main():
 
     app.add_handler(
         MessageHandler(
-            filters.AUDIO |
-            filters.Document.ALL,
-            handle_audio
+            filters.TEXT,
+            handle_message
         )
     )
 
 
-    logger.info(
+    logging.info(
         "Bot started"
     )
 
@@ -185,4 +171,5 @@ def main():
 
 
 if __name__ == "__main__":
+
     main()
