@@ -21,23 +21,18 @@ def parse_timecode(value: str | None) -> int:
     if not value:
         return 0
 
-    parts = str(value).split(":")
-
     try:
-        nums = [int(float(x)) for x in parts]
+        parts = [int(float(x)) for x in str(value).split(":")]
     except ValueError:
         return 0
 
-    if len(nums) == 3:
-        return nums[0] * 3600 + nums[1] * 60 + nums[2]
+    if len(parts) == 3:
+        return parts[0] * 3600 + parts[1] * 60 + parts[2]
 
-    if len(nums) == 2:
-        return nums[0] * 60 + nums[1]
+    if len(parts) == 2:
+        return parts[0] * 60 + parts[1]
 
-    if len(nums) == 1:
-        return nums[0]
-
-    return 0
+    return parts[0] if parts else 0
 
 
 def format_timecode(seconds: int) -> str:
@@ -53,40 +48,60 @@ def format_timecode(seconds: int) -> str:
 
 
 def _normalize(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", value.casefold())
+    return re.sub(
+        r"[^a-z0-9]+",
+        "",
+        value.casefold()
+    )
 
 
 def _track_key(song: dict[str, Any]) -> str:
-    isrc = str(song.get("isrc") or "").strip().upper()
+
+    isrc = str(
+        song.get("isrc") or ""
+    ).strip().upper()
 
     if isrc:
         return f"isrc:{isrc}"
 
-    return (
-        "meta:"
-        + _normalize(str(song.get("artist") or ""))
-        + ":"
-        + _normalize(str(song.get("title") or ""))
+    artist = _normalize(
+        str(song.get("artist") or "")
     )
 
+    title = _normalize(
+        str(song.get("title") or "")
+    )
 
-def _get_start_time(song: dict[str, Any], block: dict[str, Any]) -> int:
+    return f"meta:{artist}:{title}"
 
-    if song.get("start_offset") is not None:
+
+def _estimate_start(
+    song: dict[str, Any],
+    block: dict[str, Any]
+) -> int:
+
+    if song.get("start_offset"):
+
         try:
-            return int(float(song["start_offset"]))
+            return int(
+                float(song["start_offset"])
+            )
         except Exception:
             pass
 
-    block_offset = parse_timecode(
-        str(block.get("offset") or "0")
+
+    offset = parse_timecode(
+        block.get("offset")
     )
 
-    timecode = parse_timecode(
-        str(song.get("timecode") or "0")
+    position = parse_timecode(
+        song.get("timecode")
     )
 
-    return max(0, block_offset - timecode)
+    start = offset - position
+
+    return max(0, start)
+
 
 
 def extract_detections(
@@ -95,76 +110,148 @@ def extract_detections(
 ) -> list[Detection]:
 
     if payload.get("status") != "success":
-        raise ValueError("AudD request failed")
+        raise ValueError(
+            "AudD request failed"
+        )
+
 
     merged: dict[str, Detection] = {}
 
-    for block in payload.get("result") or []:
 
-        for song in block.get("songs") or []:
+    for block in payload.get("result", []):
 
-            artist = str(song.get("artist") or "").strip()
-            title = str(song.get("title") or "").strip()
+        for song in block.get("songs", []):
+
+            artist = str(
+                song.get("artist") or ""
+            ).strip()
+
+            title = str(
+                song.get("title") or ""
+            ).strip()
+
 
             if not artist or not title:
                 continue
 
-            score = float(song.get("score") or 100)
+
+            try:
+                score = float(
+                    song.get("score") or 0
+                )
+            except Exception:
+                score = 0
+
 
             if score < min_score:
                 continue
 
-            key = _track_key(song)
 
-            candidate = Detection(
-                key=key,
+            item = Detection(
+                key=_track_key(song),
                 artist=artist,
                 title=title,
                 score=score,
-                estimated_start=_get_start_time(song, block),
+                estimated_start=_estimate_start(
+                    song,
+                    block
+                ),
+                isrc=song.get("isrc"),
                 label=song.get("label"),
-                song_link=song.get("song_link"),
+                song_link=song.get("song_link")
             )
 
-            old = merged.get(key)
+
+            old = merged.get(
+                item.key
+            )
+
 
             if old is None:
-                merged[key] = candidate
+
+                merged[item.key] = item
+
             else:
+
                 old.estimated_start = min(
                     old.estimated_start,
-                    candidate.estimated_start
+                    item.estimated_start
                 )
 
-                if candidate.score > old.score:
-                    merged[key] = candidate
+                if item.score > old.score:
+                    item.estimated_start = old.estimated_start
+                    merged[item.key] = item
 
 
-    return sorted(
+
+    tracks = sorted(
         merged.values(),
         key=lambda x: x.estimated_start
     )
+
+
+    # удаляем ложные совпадения рядом друг с другом
+    cleaned: list[Detection] = []
+
+
+    for track in tracks:
+
+        if cleaned:
+
+            previous = cleaned[-1]
+
+
+            same_time = (
+                abs(
+                    track.estimated_start -
+                    previous.estimated_start
+                )
+                < 20
+            )
+
+
+            if same_time:
+
+                if track.score > previous.score:
+                    cleaned[-1] = track
+
+                continue
+
+
+        cleaned.append(track)
+
+
+
+    return cleaned
+
 
 
 def render_tracklist(
     detections: list[Detection]
 ) -> str:
 
+
     if not detections:
         return "Треки не распознаны."
+
 
     lines = [
         "TRACKLIST",
         ""
     ]
 
-    for i, item in enumerate(detections, 1):
+
+    for index, item in enumerate(
+        detections,
+        start=1
+    ):
 
         lines.append(
-            f"{i:02d}. "
+            f"{index:02d}. "
             f"{format_timecode(item.estimated_start)} — "
             f"{item.artist} — "
             f"{item.title}"
         )
+
 
     return "\n".join(lines)
