@@ -94,8 +94,9 @@ def extract_detections(payload: dict[str, Any], min_score: float = 55) -> list[D
             if score < min_score:
                 continue
 
-            estimated_start = int(song.get("start_offset") or block_offset)
-key = _track_key(song)
+            song_position = parse_timecode(str(song.get("timecode") or "0"))
+            estimated_start = max(0, block_offset - song_position)
+            key = _track_key(song)
 
             candidate = Detection(
                 key=key,
