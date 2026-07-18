@@ -1,219 +1,149 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Any
 
 
 @dataclass
-class Detection:
-    key: str
+class Track:
     artist: str
     title: str
+    start: int
     score: float
-    estimated_start: int
-    isrc: str | None = None
-    label: str | None = None
-    song_link: str | None = None
 
 
-def parse_timecode(value: str | None) -> int:
-    if not value:
-        return 0
-
-    parts = str(value).split(":")
-
-    try:
-        nums = [int(float(x)) for x in parts]
-    except Exception:
-        return 0
-
-    if len(nums) == 3:
-        return nums[0] * 3600 + nums[1] * 60 + nums[2]
-
-    if len(nums) == 2:
-        return nums[0] * 60 + nums[1]
-
-    if len(nums) == 1:
-        return nums[0]
-
-    return 0
+def format_time(seconds: int) -> str:
+    minutes, sec = divmod(int(seconds), 60)
+    return f"{minutes:02d}:{sec:02d}"
 
 
-def format_timecode(seconds: int) -> str:
-    seconds = max(0, int(seconds))
-
-    minutes, secs = divmod(seconds, 60)
-
-    if minutes >= 60:
-        hours, minutes = divmod(minutes, 60)
-        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-
-    return f"{minutes:02d}:{secs:02d}"
-
-
-def normalize(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", value.lower())
-
-
-def track_key(song: dict[str, Any]) -> str:
-
-    isrc = str(song.get("isrc") or "").strip().upper()
-
-    if isrc:
-        return f"isrc:{isrc}"
-
+def normalize(text: str) -> str:
     return (
-        "meta:"
-        + normalize(str(song.get("artist") or ""))
-        + ":"
-        + normalize(str(song.get("title") or ""))
+        text.lower()
+        .replace(" ", "")
+        .replace("-", "")
+        .replace("_", "")
     )
 
 
-def calculate_start(song: dict[str, Any], block: dict[str, Any]) -> int:
+def build_tracklist(
+    payload: dict[str, Any]
+) -> list[Track]:
 
-    offset = parse_timecode(
-        str(block.get("offset") or "0")
-    )
+    result = payload.get("result") or []
 
-    timecode = parse_timecode(
-        str(song.get("timecode") or "0")
-    )
-
-    start = offset - timecode
-
-    if start < 0:
-        return 0
-
-    return start
+    found: dict[str, Track] = {}
 
 
-def extract_detections(
-    payload: dict[str, Any],
-    min_score: float = 55
-) -> list[Detection]:
+    for item in result:
+
+        songs = item.get("songs") or []
+
+        start = int(
+            item.get("offset") or
+            item.get("start_offset") or
+            0
+        )
 
 
-    if payload.get("status") != "success":
-        return []
+        for song in songs:
 
+            artist = str(
+                song.get("artist") or ""
+            ).strip()
 
-    merged: dict[str, Detection] = {}
-
-
-    for block in payload.get("result", []):
-
-        for song in block.get("songs", []):
-
-
-            artist = str(song.get("artist") or "").strip()
-            title = str(song.get("title") or "").strip()
+            title = str(
+                song.get("title") or ""
+            ).strip()
 
 
             if not artist or not title:
                 continue
 
 
-            try:
-                score = float(song.get("score") or 0)
-            except Exception:
-                score = 0
-
-
-            if score < min_score:
-                continue
-
-
-
-            key = track_key(song)
-
-
-            item = Detection(
-                key=key,
-                artist=artist,
-                title=title,
-                score=score,
-                estimated_start=calculate_start(song, block),
-                isrc=song.get("isrc"),
-                label=song.get("label"),
-                song_link=song.get("song_link"),
+            score = float(
+                song.get("score") or 0
             )
 
 
-            old = merged.get(key)
+            key = (
+                normalize(artist)
+                +
+                normalize(title)
+            )
+
+
+            track = Track(
+                artist=artist,
+                title=title,
+                start=start,
+                score=score,
+            )
+
+
+            old = found.get(key)
 
 
             if old is None:
 
-                merged[key] = item
+                found[key] = track
 
 
             else:
 
-                # оставляем самое раннее появление трека
-                old.estimated_start = min(
-                    old.estimated_start,
-                    item.estimated_start
-                )
+                if track.start < old.start:
+                    old.start = track.start
 
-                # оставляем лучший score
-                if item.score > old.score:
-                    item.estimated_start = old.estimated_start
-                    merged[key] = item
+                if track.score > old.score:
+                    found[key] = track
 
 
 
-    result = list(merged.values())
-
-
-    # сортировка по времени появления
-    result.sort(
-        key=lambda x: x.estimated_start
+    tracks = list(
+        found.values()
     )
 
 
-    # дополнительная очистка дублей подряд
+    tracks.sort(
+        key=lambda x: x.start
+    )
+
+
+    # убираем слишком близкие ложные совпадения
+
     cleaned = []
 
 
-    for item in result:
+    for track in tracks:
 
-        duplicate = False
+        if cleaned:
 
-        for old in cleaned:
+            last = cleaned[-1]
 
-            same_artist = normalize(item.artist) == normalize(old.artist)
+            if (
+                abs(track.start - last.start)
+                < 15
+            ):
+                if track.score > last.score:
+                    cleaned[-1] = track
 
-            same_title = normalize(item.title) == normalize(old.title)
-
-
-            if same_artist and same_title:
-
-                old.estimated_start = min(
-                    old.estimated_start,
-                    item.estimated_start
-                )
-
-                duplicate = True
-                break
+                continue
 
 
-        if not duplicate:
-            cleaned.append(item)
+        cleaned.append(track)
 
 
     return cleaned
 
 
 
-def render_tracklist(
-    detections: list[Detection]
+def render(
+    tracks: list[Track]
 ) -> str:
 
 
-    if not detections:
-        return "Треки не распознаны."
+    if not tracks:
+        return "Треки не найдены."
 
 
     lines = [
@@ -222,13 +152,16 @@ def render_tracklist(
     ]
 
 
-    for i, item in enumerate(detections, start=1):
+    for i, track in enumerate(
+        tracks,
+        start=1
+    ):
 
         lines.append(
             f"{i:02d}. "
-            f"{format_timecode(item.estimated_start)} — "
-            f"{item.artist} — "
-            f"{item.title}"
+            f"{format_time(track.start)} — "
+            f"{track.artist} — "
+            f"{track.title}"
         )
 
 
