@@ -35,8 +35,8 @@ async def recognize_file(
                 files = {"file": (path.name, handle, "application/octet-stream")}
                 response = await client.post(AUDD_ENTERPRISE_URL, data=data, files=files)
         response.raise_for_status()
-        print("AUDD FULL RESPONSE:", payload)
         payload = response.json()
+        print("AUDD FULL RESPONSE:", payload)
     except httpx.HTTPError as exc:
         raise AudDError(f"AudD HTTP error: {exc}") from exc
     except ValueError as exc:
